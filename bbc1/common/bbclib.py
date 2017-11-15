@@ -28,6 +28,11 @@ from ecdsa import SigningKey, VerifyingKey
 
 sys.path.append("../../")
 from bbc1.common.bbc_error import *
+from third_party.bbc1_serializer import *
+from ctypes import *
+
+LIB_NAME = "../third_party/lib_bbc1_serializer.so"
+LIBC = cdll.LoadLibrary(LIB_NAME)
 
 ECDSA_CURVE = ecdsa.SECP256k1
 
@@ -238,6 +243,8 @@ class BBcSignature:
         self.pubkey = None
         self.keypair = None
 
+        self.serializer = Signature(LIBC)
+
     def add(self, signature=None, pubkey=None):
         if signature is not None:
             self.signature = signature
@@ -247,26 +254,41 @@ class BBcSignature:
         return True
 
     def serialize(self):
-        dat = bytearray(to_4byte(self.type))
-        pubkey_len_bit = len(self.pubkey) * 8
-        dat.extend(to_4byte(pubkey_len_bit))
-        dat.extend(self.pubkey)
-        sig_len_bit = len(self.signature) * 8
-        dat.extend(to_4byte(sig_len_bit))
-        dat.extend(self.signature)
-        return bytes(dat)
+        self.serializer.inited()
+        self.serializer.set_type(self.type)
+
+        if self.pubkey != None:
+            self.serializer.set_public_key_length(len(self.pubkey))
+            self.serializer.set_public_key(self.pubkey)
+        else:
+            self.serializer.set_public_key_length(0)
+
+        if self.signature != None:
+            self.serializer.set_signature_length(len(self.signature))
+            self.serializer.set_signature(self.signature)
+        else:
+            self.serializer.set_signature_length(0)
+
+        return self.serializer.get_packet()
 
     def deserialize(self, data):
-        ptr = 0
+        self.serializer.inited()
         try:
-            ptr, self.type = get_n_byte_int(ptr, 4, data)
-            ptr, pubkey_len_bit = get_n_byte_int(ptr, 4, data)
-            pubkey_len = int(pubkey_len_bit/8)
-            ptr, pubkey = get_n_bytes(ptr, pubkey_len, data)
-            ptr, sig_len_bit = get_n_byte_int(ptr, 4, data)
-            sig_len = int(sig_len_bit/8)
-            ptr, signature = get_n_bytes(ptr, sig_len, data)
-            self.add(signature=signature, pubkey=pubkey)
+            LIBC.parse_Signature(data, byref(self.signature))
+            self.type = self.signature.get_type()
+
+            if self.signature.get_public_key_length() != 0:
+                self.pubkey = self.signature.get_public_key()
+            else:
+                self.pubkey = bytes()
+
+            if self.signature.get_signature_length() != 0:
+                self.signature = self.signature.get_signature()
+            else:
+                self.signature = bytes()
+
+            LIBC.free_Signiture(byref(self.signature))
+            self.add(signature=self.signature, pubkey=self.pubkey)
         except:
             return False
         return True
@@ -294,6 +316,10 @@ class BBcTransaction:
         self.userid_sigidx_mapping = dict()
         self.transaction_id = None
         self.transaction_base_digest = None
+
+        self.serializer = Transaction(LIBC)
+        self.transaction_base = Transaction_Base(LIBC)
+        self.intermediate = Intermediate(LIBC)
 
     def add(self, event=None, reference=None, cross_ref=None):
         if event is not None:
@@ -333,86 +359,115 @@ class BBcTransaction:
         return d
 
     def serialize(self, for_id=False):
-        dat = bytearray(to_4byte(self.version))
-        dat.extend(to_8byte(self.timestamp))
-        dat.extend(to_2byte(len(self.events)))
-        for i in range(len(self.events)):
-            evt = self.events[i].serialize()
-            dat.extend(to_4byte(len(evt)))
-            dat.extend(evt)
-        dat.extend(to_2byte(len(self.references)))
-        for i in range(len(self.references)):
-            refe = self.references[i].serialize()
-            dat.extend(to_4byte(len(refe)))
-            dat.extend(refe)
         if for_id:
-            self.transaction_base_digest = hashlib.sha256(dat).digest()
 
-        dat_cross = bytearray(to_2byte(len(self.cross_refs)))
-        for i in range(len(self.cross_refs)):
-            cross = self.cross_refs[i].serialize()
-            dat_cross.extend(to_4byte(len(cross)))
-            dat_cross.extend(cross)
+            self.transaction_base.inited()
 
-        if for_id:
-            dat2 = bytearray(self.transaction_base_digest)
-            dat2.extend(dat_cross)
-            return bytes(dat2)
+            self.transaction_base.set_version(self.version)
+            self.transaction_base.set_timestamp(self.timestamp)
 
-        dat.extend(dat_cross)
+            if len(self.events) > 0:
+                for i in range(len(self.events)):
+                    u_byte = self.events[i].serialize()
+                    LIBC.add_to_events_list_of_Transaction_Base(byref(self.transaction_base), len(u_byte), u_byte);
 
-        real_signum = 0
-        for sig in self.signatures:
-            if sig is not None:
-                real_signum += 1
-        dat.extend(to_2byte(real_signum))
-        for i in range(real_signum):
-            sig = self.signatures[i].serialize()
-            dat.extend(to_4byte(len(sig)))
-            dat.extend(sig)
-        return bytes(dat)
+            if len(self.references) > 0:
+                for i in range(len(self.references)):
+                    u_byte = self.references[i].serialize()
+                    LIBC.add_to_references_list_of_Transaction_Base(byref(self.transaction_base),  len(u_byte), u_byte);
+
+            intermediate = self.transaction_base.get_packet()
+            intermediate_txid = hashlib.sha256(intermediate).digest()
+
+            self.intermediate.inited()
+            self.intermediate.get_transaction_base_digest().set_value(intermediate_txid)
+            self.intermediate.get_transaction_base_digest().set_len(len(intermediate_txid))
+
+            if len(self.cross_refs) > 0:
+                for i in range(len(self.cross_refs)):
+                    u_byte = self.cross_refs[i].serialize()
+                    LIBC.add_to_cross_refs_list_of_Intermediate(byref(self.intermediate),  len(u_byte), u_byte)
+
+            packet = self.intermediate.get_packet()
+
+            LIBC.free_events_of_Transaction_Base(byref(self.transaction_base))
+            LIBC.free_references_of_Transaction_Base(byref(self.transaction_base))
+            LIBC.free_cross_refs_of_Intermediate(byref(self.intermediate))
+            return packet
+
+        else:
+
+            self.serializer.inited()
+
+            self.serializer.set_version(self.version)
+            self.serializer.set_timestamp(self.timestamp)
+
+            for i in range(len(self.events)):
+                u_byte = self.events[i].serialize()
+                LIBC.add_to_events_list_of_Transaction(byref(self.serializer),
+                                                 len(u_byte), u_byte)
+
+            for i in range(len(self.references)):
+                u_byte = self.references[i].serialize()
+                LIBC.add_to_references_list_of_Transaction(byref(self.serializer),
+                                                     len(u_byte), u_byte)
+
+            for i in range(len(self.cross_refs)):
+                u_byte = self.cross_refs[i].serialize()
+                LIBC.add_to_cross_refs_list_of_Transaction(byref(self.serializer),
+                                                      len(u_byte), u_byte)
+
+            for i in range(len(self.signatures)):
+                if self.signatures[i] is not None:
+                    b_byte = self.signatures[i].serialize()
+                    LIBC.add_to_signatures_list_of_Transaction(byref(self.serializer),
+                                                          len(b_byte), b_byte)
+                else:
+
+                    b_byte = bytes(0x00)
+                    LIBC.add_to_signatures_list_of_Transaction(byref(self.serializer),
+                                                          len(b_byte), b_byte)
+
+            packet = self.serializer.get_packet()
+            LIBC.free_events_of_Transaction(byref(self.serializer))
+            LIBC.free_references_of_Transaction(byref(self.serializer))
+            LIBC.free_cross_refs_of_Transaction(byref(self.serializer))
+            LIBC.free_signatures_of_Transaction(byref(self.serializer))
+            return packet
 
     def deserialize(self, data):
-        ptr = 0
+        self.serializer.inited()
         try:
-            ptr, self.version = get_n_byte_int(ptr, 4, data)
-            ptr, self.timestamp = get_n_byte_int(ptr, 8, data)
-            ptr, evt_num = get_n_byte_int(ptr, 2, data)
-            self.events = []
-            for i in range(evt_num):
-                ptr, size = get_n_byte_int(ptr, 4, data)
-                ptr, evtdata = get_n_bytes(ptr, size, data)
-                evt = BBcEvent()
-                evt.deserialize(evtdata)
-                self.events.append(evt)
+            LIBC.parse_Transaction(data, byref(self.serializer))
 
-            ptr, ref_num = get_n_byte_int(ptr, 2, data)
-            self.references = []
-            for i in range(ref_num):
-                ptr, size = get_n_byte_int(ptr, 4, data)
-                ptr, refdata = get_n_bytes(ptr, size, data)
-                refe = BBcReference(None, None)
-                refe.deserialize(refdata)
-                self.references.append(refe)
+            self.version = self.serializer.get_version()
+            self.timestamp = self.serializer.get_timestamp()
 
-            ptr, cross_num = get_n_byte_int(ptr, 2, data)
-            self.cross_refs = []
-            for i in range(cross_num):
-                ptr, size = get_n_byte_int(ptr, 4, data)
-                ptr, crossdata = get_n_bytes(ptr, size, data)
-                cross = BBcCrossRef()
-                cross.deserialize(crossdata)
-                self.cross_refs.append(cross)
+            if self.serializer.get_event_num() > 0:
+                self.events = [BBcEvent() for i in range(self.serializer.get_event_num())]
+                for i in range(self.serializer.get_event_num()):
+                    self.events[i].deserialize(self.serializer.get_events_list_using_index(i).get_Length_Value_value())
 
-            ptr, sig_num = get_n_byte_int(ptr, 2, data)
-            self.signatures = []
-            for i in range(sig_num):
-                ptr, size = get_n_byte_int(ptr, 4, data)
-                ptr, sigdata = get_n_bytes(ptr, size, data)
-                sig = BBcSignature()
-                sig.deserialize(sigdata)
-                self.signatures.append(sig)
+            if self.serializer.get_reference_num() > 0:
+                self.references = [BBcReference(None, None) for i in range(self.serializer.get_reference_num())]
+                for i in range(self.serializer.get_reference_num()):
+                    self.references[i].deserialize(
+                        self.serializer.get_references_list_using_index(i).get_Length_Value_value())
+
+            if self.serializer.get_cross_ref_num() > 0:
+                self.cross_refs = [BBcCrossRef() for i in range(self.serializer.get_cross_ref_num())]
+                for i in range(self.serializer.get_cross_ref_num()):
+                    self.cross_refs[i].deserialize(
+                        self.serializer.get_cross_refs_list_using_index(i).get_Length_Value_value())
+
+            if self.serializer.get_signature_num() > 0:
+                self.signatures = [BBcSignature() for i in range(self.serializer.get_signature_num())]
+                for i in range(self.serializer.get_signature_num()):
+                    if self.serializer.get_signatures_list_using_index(i).get_Length_Value_value() != bytes(0x00):
+                        self.signatures[i].deserialize(
+                            self.serializer.get_signatures_list_using_index(i).get_Length_Value_value())
             self.digest()
+            LIBC.free_Transaction(byref(self.serializer))
         except Exception as e:
             print("Transaction data deserialize: %s" % e)
             print(traceback.format_exc())
@@ -515,8 +570,10 @@ class BBcTransaction:
                     print("  *RESERVED*")
                     continue
                 print("  type:", sig.type)
-                print("  signature:", binascii.b2a_hex(sig.signature))
-                print("  pubkey:", binascii.b2a_hex(sig.pubkey))
+                if sig.signature is not None:
+                    print("  signature:", binascii.b2a_hex(sig.signature))
+                if sig.pubkey is not None:
+                    print("  pubkey:", binascii.b2a_hex(sig.pubkey))
         else:
             print("  None")
 
@@ -530,6 +587,8 @@ class BBcEvent:
         self.option_approver_num_denominator = 0
         self.option_approvers = []
         self.asset = None
+
+        self.serializer = Event(LIBC)
 
     def add(self, asset_group_id=None, reference_index=None, mandatory_approver=None,
             option_approver_num_numerator=0, option_approver_num_denominator=0,
@@ -550,49 +609,94 @@ class BBcEvent:
             self.asset = asset
         return True
 
+
     def serialize(self):
-        dat = bytearray(to_bigint(self.asset_group_id))
-        dat.extend(to_2byte(len(self.reference_indices)))
-        for i in range(len(self.reference_indices)):
-            dat.extend(to_2byte(self.reference_indices[i]))
-        dat.extend(to_2byte(len(self.mandatory_approvers)))
-        for i in range(len(self.mandatory_approvers)):
-            dat.extend(to_bigint(self.mandatory_approvers[i]))
-        dat.extend(to_2byte(self.option_approver_num_numerator))
-        dat.extend(to_2byte(self.option_approver_num_denominator))
-        for i in range(self.option_approver_num_denominator):
-            dat.extend(to_bigint(self.option_approvers[i]))
-        ast = self.asset.serialize()
-        dat.extend(to_4byte(len(ast)))
-        dat.extend(ast)
-        return bytes(dat)
+        self.serializer.inited()
+
+        if self.asset_group_id != None:
+            self.serializer.get_asset_group_id().set_len(len(self.asset_group_id))
+            self.serializer.get_asset_group_id().set_value(self.asset_group_id)
+        else:
+            self.serializer.get_asset_group_id().set_len(0)
+
+        if self.reference_indices != None and len(self.reference_indices) > 0:
+            for i in range(len(self.reference_indices)):
+                uint16_list = List_c_uint16(LIBC)
+                u_byte = self.reference_indices[i]
+                uint16_list.set_c_uint16_value(u_byte)
+                self.serializer.add_to_reference_indices_list(uint16_list)
+        else:
+            self.serializer.set_reference_num(0)
+
+        if self.mandatory_approvers != None and len(self.mandatory_approvers) > 0:
+            for i in range(len(self.mandatory_approvers)):
+                u_byte = self.mandatory_approvers[i]
+                LIBC.add_to_mandatory_approvers_list_of_Event(byref(self.serializer), len(u_byte), u_byte);
+
+        else:
+            self.serializer.set_mandatory_approver_num(0)
+
+        self.serializer.set_option_approval_numerator(self.option_approver_num_numerator)
+
+        if len(self.option_approvers) != None and len(self.option_approvers) > 0:
+            for i in range(len(self.option_approvers)):
+                u_byte = self.option_approvers[i]
+                LIBC.add_to_option_approvers_list_of_Event(byref(self.serializer), len(u_byte), u_byte);
+
+        else:
+            self.serializer.set_option_approval_denominator(0)
+
+        if self.asset != None:
+            a_byte = self.asset.serialize()
+            self.serializer.set_asset(a_byte)
+            self.serializer.set_asset_length(len(a_byte))
+        else:
+            self.serializer.set_asset_length(0)
+
+        packet = self.serializer.get_packet()
+        LIBC.free_mandatory_approvers_of_Event(byref(self.serializer))
+        LIBC.free_option_approvers_of_Event(byref(self.serializer))
+
+        return packet
 
     def deserialize(self, data):
-        ptr = 0
+        self.serializer.inited()
         try:
-            ptr, self.asset_group_id = get_bigint(ptr, data)
-            ptr, ref_num = get_n_byte_int(ptr, 2, data)
+            LIBC.parse_Event(data, byref(self.serializer))
+
+            if self.serializer.get_asset_group_id().get_len() > 0:
+                self.asset_group_id = self.serializer.get_asset_group_id().get_value()
+
             self.reference_indices = []
-            for i in range(ref_num):
-                ptr, idx = get_n_byte_int(ptr, 2, data)
-                self.reference_indices.append(idx)
-            ptr, appr_num = get_n_byte_int(ptr, 2, data)
+            if self.serializer.get_reference_num() > 0:
+                for i in range(self.serializer.get_reference_num()):
+                    u_byte = self.serializer.get_reference_indices_list_using_index(i).get_c_uint16_value()
+                    self.reference_indices.append(u_byte)
+
             self.mandatory_approvers = []
-            for i in range(appr_num):
-                ptr, appr = get_bigint(ptr, data)
-                self.mandatory_approvers.append(appr)
-            ptr, self.option_approver_num_numerator = get_n_byte_int(ptr, 2, data)
-            ptr, self.option_approver_num_denominator = get_n_byte_int(ptr, 2, data)
+            if self.serializer.get_mandatory_approver_num() > 0:
+                for i in range(self.serializer.get_mandatory_approver_num()):
+                    u_byte = self.serializer.get_mandatory_approvers_list_using_index(i).get_Length_Value_value()
+                    self.mandatory_approvers.append(u_byte)
+
+            self.option_approver_num_numerator = self.serializer.get_option_approval_numerator()
+            self.option_approver_num_denominator = self.serializer.get_option_approval_denominator()
+
             self.option_approvers = []
-            for i in range(self.option_approver_num_denominator):
-                ptr, appr = get_bigint(ptr, data)
-                self.option_approvers.append(appr)
-            ptr, astsize = get_n_byte_int(ptr, 4, data)
-            ptr, astdata = get_n_bytes(ptr, astsize, data)
+            if self.option_approver_num_denominator > 0:
+                for i in range(self.option_approver_num_denominator):
+                    u_byte = self.serializer.get_option_approvers_list_using_index(i).get_Length_Value_value()
+                    self.option_approvers.append(u_byte)
+
             self.asset = BBcAsset()
-            self.asset.deserialize(astdata)
+            if self.serializer.get_asset_length() > 0:
+                b_asset = self.serializer.get_asset()
+                self.asset.deserialize(b_asset)
+            LIBC.free_Event(byref(self.serializer))
         except:
+            print("Event_expect")
             return False
+
         return True
 
 
@@ -607,6 +711,9 @@ class BBcReference:
         self.mandatory_approvers = None
         self.option_approvers = None
         self.option_sig_ids = []
+
+        self.serializer = Reference(LIBC)
+
         if ref_transaction is None:
             return
         self.prepare_reference(ref_transaction=ref_transaction)
@@ -641,29 +748,58 @@ class BBcReference:
         return self.mandatory_approvers+self.option_approvers
 
     def serialize(self):
-        dat = bytearray(to_bigint(self.asset_group_id))
-        dat.extend(to_bigint(self.transaction_id))
-        dat.extend(to_2byte(self.event_index_in_ref))
-        dat.extend(to_2byte(len(self.sig_indices)))
-        for i in range(len(self.sig_indices)):
-            dat.extend(to_2byte(self.sig_indices[i]))
-        return bytes(dat)
+        self.serializer.inited()
+
+        if self.asset_group_id != None:
+            self.serializer.get_asset_group_id().set_len(len(self.asset_group_id))
+            self.serializer.get_asset_group_id().set_value(self.asset_group_id)
+        else:
+            self.serializer.get_asset_group_id().set_len(0)
+
+        if self.transaction_id != None:
+            self.serializer.get_transaction_id().set_len(len(self.transaction_id))
+            self.serializer.get_transaction_id().set_value(self.transaction_id)
+        else:
+            self.serializer.get_transaction_id().set_len(0)
+
+        self.serializer.set_event_index(self.event_index_in_ref)
+        length = len(self.sig_indices)
+        if length != None and length != 0:
+            for i in range(length):
+                uint16_list = List_c_uint16(LIBC)
+                u_byte = self.sig_indices[i]
+                uint16_list.set_c_uint16_value(u_byte)
+                self.serializer.add_to_signature_indices_list(uint16_list)
+
+        return self.serializer.get_packet()
 
     def deserialize(self, data):
-        ptr = 0
+        self.serializer.inited()
         try:
-            ptr, self.asset_group_id = get_bigint(ptr, data)
-            ptr, self.transaction_id = get_bigint(ptr, data)
-            ptr, self.event_index_in_ref = get_n_byte_int(ptr, 2, data)
-            ptr, signum = get_n_byte_int(ptr, 2, data)
+            LIBC.parse_Reference(data, byref(self.serializer))
+
+            if self.serializer.get_asset_group_id().get_len() != 0:
+                self.asset_group_id = self.serializer.get_asset_group_id().get_value()
+            else:
+                self.asset_group_id = None
+
+            if self.serializer.get_transaction_id().get_len() != 0:
+                self.transaction_id = self.serializer.get_transaction_id().get_value()
+            else:
+                self.transaction_id = None
+
+            self.event_index = self.serializer.get_event_index()
             self.sig_indices = []
-            for i in range(signum):
-                ptr, idx = get_n_byte_int(ptr, 2, data)
-                self.sig_indices.append(idx)
+            if self.serializer.get_signature_indice_num() != 0:
+                for i in range(self.serializer.get_signature_indice_num()):
+
+                    self.sig_indices.append(self.serializer.get_signature_indices_list_using_index(i).get_c_uint16_value())
+            else:
+                self.sig_indices = []
+            LIBC.free_Reference(byref(self.serializer))
         except:
             return False
         return True
-
 
 class BBcAsset:
     def __init__(self):
@@ -675,6 +811,9 @@ class BBcAsset:
         self.asset_file_digest = None
         self.asset_body_size = 0
         self.asset_body = []    # up to 256 bytes
+
+        self.serializer = Asset(LIBC)
+        #self.asset_base = Asset_Base(LIBC)
 
     def add(self, user_id=None, asset_file=None, asset_body=None):
         if user_id is not None:
@@ -715,43 +854,130 @@ class BBcAsset:
 
     def serialize(self, for_digest_calculation=False):
         if for_digest_calculation:
-            dat = bytearray(to_bigint(self.user_id))
-            dat.extend(to_2byte(len(self.nonce)))
-            dat.extend(self.nonce)
-            dat.extend(to_4byte(self.asset_file_size))
-            if self.asset_file_size > 0:
-                dat.extend(self.asset_file_digest)
-            dat.extend(to_2byte(self.asset_body_size))
-            if self.asset_body_size > 0:
-                dat.extend(self.asset_body)
-            return bytes(dat)
+            self.serializer.inited()
+            if self.asset_id != None and self.asset_id != 0:
+                u_byte = self.asset_id
+                self.serializer.get_asset_id().set_len(len(u_byte))
+                self.serializer.get_asset_id().set_value(u_byte)
+            else:
+               self.serializer.get_asset_id().set_len(0)
+
+            if self.user_id != None and self.user_id != 0:
+                self.serializer.get_user_id().set_len(len(self.user_id))
+                self.serializer.get_user_id().set_value(self.user_id)
+            else:
+                self.serializer.get_user_id().set_len(0)
+
+            if self.nonce != None:
+                self.serializer.set_nonce_length(len(self.nonce))  # nonceは8バイト固定
+                self.serializer.set_nonce(self.nonce)
+            else:
+                self.serializer.set_nonce_length(0)
+
+            if self.asset_file_size != None and self.asset_file_size != 0:
+                self.serializer.set_asset_file_size(self.asset_file_size)
+            else:
+                self.serializer.set_asset_file_size(0)
+
+            if self.asset_file_digest != None and len(self.asset_file_digest) != 0:
+                self.serializer.get_asset_file_digest().set_len(len(self.asset_file_digest))
+                self.serializer.get_asset_file_digest().set_value(self.asset_file_digest)
+            else:
+                self.serializer.get_asset_file_digest().set_len(0)
+
+            if self.asset_body_size != None and self.asset_body_size != 0:
+                if type(self.asset_body) is str:
+                    u_byte = self.asset_body.encode()
+                    self.serializer.set_body(u_byte)
+                    self.serializer.set_body_size(len(u_byte))
+                elif type(self.asset_body) is bytes:
+                    self.serializer.set_body(self.asset_body)
+                    self.serializer.set_body_size(len(self.asset_body))
+            else:
+                self.serializer.set_body_size(0)
+
+
+            return self.serializer.get_packet()
+
         else:
-            dat = bytearray(to_bigint(self.asset_id))
-            dat.extend(to_bigint(self.user_id))
-            dat.extend(to_2byte(len(self.nonce)))
-            dat.extend(self.nonce)
-            dat.extend(to_4byte(self.asset_file_size))
-            if self.asset_file_size > 0:
-                dat.extend(to_bigint(self.asset_file_digest))
-            dat.extend(to_2byte(self.asset_body_size))
-            if self.asset_body_size > 0:
-                dat.extend(self.asset_body)
-            return bytes(dat)
+            self.serializer.inited()
+            if self.asset_id != None and self.asset_id != 0:
+                u_byte = self.asset_id
+                self.serializer.get_asset_id().set_len(len(u_byte))
+                self.serializer.get_asset_id().set_value(u_byte)
+            else:
+               self.serializer.get_asset_id().set_len(0)
+
+            if self.user_id != None and self.user_id != 0:
+                u_byte = self.user_id
+                self.serializer.get_user_id().set_len(len(u_byte))
+                self.serializer.get_user_id().set_value(u_byte)
+
+            else:
+                self.serializer.get_user_id().set_len(0)
+
+            if self.nonce != None and self.nonce !=0:
+                self.serializer.set_nonce_length(len(self.nonce))  # nonceは8バイト固定
+                self.serializer.set_nonce(self.nonce)
+
+            else:
+                self.serializer.set_nonce_length(0)
+
+            if self.asset_file_size != None and self.asset_file_size != 0:
+                self.serializer.set_asset_file_size(self.asset_file_size)
+            else:
+                self.serializer.set_asset_file_size(0)
+
+            if self.asset_file_digest != None:
+                u_byte = self.asset_file_digest
+                self.serializer.get_asset_file_digest().set_len(len(u_byte))
+                self.serializer.get_asset_file_digest().set_value(u_byte)
+
+            else:
+                self.serializer.get_asset_file_digest().set_len(0)
+
+            if self.asset_body_size != None and self.asset_body_size != 0:
+                if type(self.asset_body) is str:
+                    u_byte = self.asset_body.encode()
+                    self.serializer.set_body(u_byte)
+                    self.serializer.set_body_size(len(u_byte))
+                elif type(self.asset_body) is bytes:
+                    self.serializer.set_body(self.asset_body)
+                    self.serializer.set_body_size(len(self.asset_body))
+
+            else:
+                self.serializer.set_body_size(0)
+
+            return self.serializer.get_packet()
 
     def deserialize(self, data):
-        ptr = 0
+        self.serializer.inited()
         try:
-            ptr, self.asset_id = get_bigint(ptr, data)
-            ptr, self.user_id = get_bigint(ptr, data)
-            ptr, noncelen = get_n_byte_int(ptr, 2, data)
-            ptr, self.nonce = get_n_bytes(ptr, noncelen, data)
-            ptr, self.asset_file_size = get_n_byte_int(ptr, 4, data)
-            if self.asset_file_size > 0:
-                ptr, self.asset_file_digest = get_bigint(ptr, data)
-            ptr, self.asset_body_size = get_n_byte_int(ptr, 2, data)
+            LIBC.parse_Asset(data, byref(self.serializer))
+
+            if self.serializer.get_asset_id().get_len()>0:
+                self.asset_id = self.serializer.get_asset_id().get_value()
+
+            if self.serializer.get_user_id().get_len()>0:
+                self.user_id = self.serializer.get_user_id().get_value()
+
+            if self.serializer.get_nonce_length()>0:
+                self.nonce = self.serializer.get_nonce()
+
+            self.asset_file_size = self.serializer.get_asset_file_size()
+            if self.serializer.get_asset_file_digest().get_len() != 0:
+
+                self.asset_file_digest = self.serializer.get_asset_file_digest().get_value()
+
+            self.asset_body_size = self.serializer.get_body_size()
             if self.asset_body_size > 0:
-                ptr, self.asset_body = get_n_bytes(ptr, self.asset_body_size, data)
+                self.asset_body = self.serializer.get_body()
+            else:
+                self.asset_body = bytearray()
+            self.asset_in_storage = None
+            LIBC.free_Asset(byref(self.serializer))
         except:
+            #print("Asset")
             traceback.print_exc()
             return False
         return True
@@ -762,16 +988,41 @@ class BBcCrossRef:
         self.asset_group_id = asset_group_id
         self.transaction_id = transaction_id
 
+        self.serializer = Cross_Ref(LIBC)
+
     def serialize(self):
-        dat = bytearray(to_bigint(self.asset_group_id))
-        dat.extend(to_bigint(self.transaction_id))
-        return bytes(dat)
+        if self.asset_group_id != None and self.asset_group_id != 0:
+            u_byte = self.asset_group_id
+            self.serializer.get_asset_group_id().set_len(len(u_byte))
+            self.serializer.get_asset_group_id().set_value(u_byte)
+        else:
+            self.serializer.get_asset_group_id().set_len(0)
+
+        if self.transaction_id != None and self.transaction_id != 0:
+            u_byte = self.transaction_id
+            self.serializer.get_transaction_id().set_len(len(u_byte))
+            self.serializer.get_transaction_id().set_value(u_byte)
+        else:
+            self.serializer.get_transaction_id().set_len(0)
+
+        return self.serializer.get_packet()
 
     def deserialize(self, data):
-        ptr = 0
+        self.serializer.inited()
+
         try:
-            ptr, self.asset_group_id = get_bigint(ptr, data)
-            ptr, self.transaction_id = get_bigint(ptr, data)
+            LIBC.parse_Cross_Ref(data, byref(self.serializer))
+            if self.serializer.get_asset_group_id().get_len()!=0:
+                self.asset_group_id = self.serializer.get_asset_group_id().get_value()
+            else:
+                self.asset_group_id = None
+
+            if self.serializer.get_transaction_id().get_len() != 0:
+                self.transaction_id = self.serializer.get_transaction_id().get_value()
+            else:
+                self.transaction_id = None
+
+            LIBC.free_Cross_Ref(byref(self.serializer))
         except:
             return False
         return True
