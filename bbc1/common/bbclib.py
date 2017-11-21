@@ -248,6 +248,7 @@ class BBcSignature:
     def add(self, signature=None, pubkey=None):
         if signature is not None:
             self.signature = signature
+            print("signature:::::::::",signature)
         if pubkey is not None:
             self.pubkey = pubkey
             self.keypair = KeyPair(type=self.type, pubkey=pubkey)
@@ -257,13 +258,13 @@ class BBcSignature:
         self.serializer.inited()
         self.serializer.set_type(self.type)
 
-        if self.pubkey != None:
+        if self.pubkey != None and len(self.signature) != 0:
             self.serializer.set_public_key_length(len(self.pubkey))
             self.serializer.set_public_key(self.pubkey)
         else:
             self.serializer.set_public_key_length(0)
 
-        if self.signature != None:
+        if self.signature != None and len(self.signature) != 0:
             self.serializer.set_signature_length(len(self.signature))
             self.serializer.set_signature(self.signature)
         else:
@@ -274,21 +275,22 @@ class BBcSignature:
     def deserialize(self, data):
         self.serializer.inited()
         try:
-            LIBC.parse_Signature(data, byref(self.signature))
-            self.type = self.signature.get_type()
+            LIBC.parse_Signature(data, byref(self.serializer))
+            self.type = self.serializer.get_type()
 
-            if self.signature.get_public_key_length() != 0:
-                self.pubkey = self.signature.get_public_key()
-            else:
-                self.pubkey = bytes()
+            if self.serializer.get_public_key_length() != 0:
+                self.pubkey = self.serializer.get_public_key()
+            #else:
+            #    self.pubkey = bytes()
 
-            if self.signature.get_signature_length() != 0:
-                self.signature = self.signature.get_signature()
-            else:
-                self.signature = bytes()
+            if self.serializer.get_signature_length() != 0:
+                self.signature = self.serializer.get_signature()
+            #else:
+            #    self.signature = bytes()
 
-            LIBC.free_Signiture(byref(self.signature))
             self.add(signature=self.signature, pubkey=self.pubkey)
+            LIBC.free_Signiture(byref(self.serializer))
+
         except:
             return False
         return True
@@ -570,10 +572,8 @@ class BBcTransaction:
                     print("  *RESERVED*")
                     continue
                 print("  type:", sig.type)
-                if sig.signature is not None:
-                    print("  signature:", binascii.b2a_hex(sig.signature))
-                if sig.pubkey is not None:
-                    print("  pubkey:", binascii.b2a_hex(sig.pubkey))
+                print("  signature:", binascii.b2a_hex(sig.signature))
+                print("  pubkey:", binascii.b2a_hex(sig.pubkey))
         else:
             print("  None")
 
